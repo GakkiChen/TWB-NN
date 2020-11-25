@@ -1,200 +1,128 @@
-__author__ = 'Jiri Fajtl'
-__email__ = 'ok1zjf@gmail.com'
-__version__= '2.2'
-__status__ = "Research"
-__date__ = "28/1/2018"
-__license__= "MIT License"
-
-import os
 import numpy as np
+import os
 import glob
-
-import subprocess
-import platform
-import sys
-import pkg_resources
+import shutil
+from random import shuffle
+import math
 import torch
-import PIL as Image
-
-try:
-    import cv2
-except:
-    print("WARNING: Could not load OpenCV python package. Some functionality may not be available.")
+import torch.nn as nn
+from torch.autograd import Variable
+from torchvision import transforms
+import shutil
 
 
-def list_files(path, extensions=[], sort=True, max_len=-1):
-    if os.path.isdir(path):
-        filenames = [os.path.join(path, fn) for fn in os.listdir(path) if
-                           any([fn.endswith(ext) for ext in extensions])]
-    else:
-        print("ERROR. ", path,' is not a directory!')
-        return []
+def data_transforms_cifar100():
+    CIFAR_MEAN = [0.5071, 0.4867, 0.4408]
+    CIFAR_STD = [0.2675, 0.2565, 0.2761]
 
-    if sort:
-        filenames.sort()
+    train_transform = transforms.Compose([
+      transforms.RandomCrop(32, padding=4),
+      transforms.RandomHorizontalFlip(),
+      transforms.ToTensor(),
+      transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+  ])
 
-    if max_len>-1:
-        filenames = filenames[:max_len]
-
-    return filenames
-
-
-def get_video_list(video_path, max_len=-1):
-    return list_files(video_path, extensions=['avi', 'flv', 'mpg', 'mp4'], sort=True, max_len=max_len)
-
-def get_image_list(video_path, max_len=-1):
-    return list_files(video_path, extensions=['jpg', 'jpeg', 'png'], sort=True, max_len=max_len)
+    valid_transform = transforms.Compose([
+      transforms.ToTensor(),
+      transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+    ])
+    return train_transform, valid_transform
 
 
-def get_split_files(dataset_path, splits_path, split_name, absolute_path=False):
-    path = os.path.join(dataset_path, splits_path, split_name)
-    files = glob.glob(path)
-    files.sort()
+def unpickle(file):
 
-    if not absolute_path:
-        files_out = []
-        for file in files:
-            _,filename = os.path.split(file)
-            files_out.append(filename)
-        return files_out
-
-    return files
+    with open(file, 'rb') as fo:
+        dict = cPickle.load(fo)
+    return dict
 
 
-def get_max_rc_weights(experiment_path):
+def unpack_data(config):
 
-    log_filename = 'train_log_0.csv'
-    try:
-        f = open(os.path.join(experiment_path, log_filename), 'rt')
-        max_rc = 0
-        max_epoch = -1
-        max_mse = -1
-        for line in f:
-            toks = line.split(',')
-            if toks[0] == 'val':
-                epoch = toks[1]
-                try:
-                    rc = float(toks[4])
-                    if rc > max_rc:
-                        max_rc = rc
-                        max_epoch = int(epoch)
-                        max_mse = float(toks[6])
-                except:
-                    pass
-        f.close()
+    train_file = config['train_file']
+    test_file = config['test_file']
+    train_data = unpickle(train_file)
+    test_data = unpickle(test_file)
 
-        chkpt_file = experiment_path + '/' + 'weights_' + str(max_epoch) + '.pkl'
-        if not os.path.isfile(chkpt_file):
-            print("WARNING: File ",chkpt_file," does not exists!")
-            return '', 0, 0, 0
-
-        return chkpt_file, max_rc, max_mse, max_epoch
-
-    except:
-        print('WARNING: Could not open  ' + os.path.join(experiment_path, log_filename))
-
-    return '', 0, 0, 0
+    return train_data, test_data
 
 
-def get_split_index(split_filename):
-    filename, _ = os.path.splitext(split_filename)
-    id = int(filename.split('_')[-1])
-    return id
+def adjust_learning_rate(args, epoch, step_idx, learning_rate):
+
+    if epoch == args.learning_step[step_idx]:
+        learning_rate = learning_rate * 0.1
+        step_idx += 1
+    return step_idx, learning_rate
 
 
-def get_weight_files(split_files, experiment_name, max_rc_checkpoints=True):
-    data_dir = 'data'
-    weight_files = []
-    for split_filename in split_files:
-        split_name,_ = os.path.splitext(split_filename)
 
-        _, split_id = split_name.split('_')
+def create_folder(args):
 
-        weight_files_all = os.path.join(data_dir, experiment_name+'_train_'+split_id+'/*.pkl')
-        files = glob.glob(weight_files_all)
-        if len(files) == 0:
-            # No trained model weights for this split
-            weight_files.append('')
-            continue
-        elif len(files) == 1:
-            weight_files.append(files[0])
+    if not os.path.exists(args.weights_dir):
+        os.makedirs(args.weights_dir)
+        print("Creat folder: " + args.weights_dir)
+
+
+class AvgrageMeter(object):
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.avg = 0
+        self.sum = 0
+        self.cnt = 0
+
+    def update(self, val, n=1):
+        self.sum += val * n
+        self.cnt += n
+        self.avg = self.sum / self.cnt
+
+
+def accuracy(output, target, topk=(1,)):
+    maxk = max(topk)
+    batch_size = target.size(0)
+
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+    res = []
+    for k in topk:
+        correct_k = correct[:k].view(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0/batch_size))
+    return res
+
+
+
+
+def create_exp_dir(path, scripts_to_save=None):
+  if not os.path.exists(path):
+    os.mkdir(path)
+  print('Experiment dir : {}'.format(path))
+
+  if scripts_to_save is not None:
+    os.mkdir(os.path.join(path, 'scripts'))
+    for script in scripts_to_save:
+      dst_file = os.path.join(path, 'scripts', os.path.basename(script))
+      shutil.copyfile(script, dst_file)
+
+
+
+def dataparallel(model, ngpus, gpu0=0):
+    if ngpus==0:
+        assert False, "only support gpu mode"
+    gpu_list = list(range(gpu0, gpu0+ngpus))
+    assert torch.cuda.device_count() >= gpu0 + ngpus
+    if ngpus > 1:
+        if not isinstance(model, nn.DataParallel):
+            model = nn.DataParallel(model, gpu_list).cuda()
         else:
-            # Multiple weights
-            if max_rc_checkpoints:
-                weights_dir = os.path.join(data_dir, experiment_name + '_train_' + split_id)
-                print("Selecting model weights with the highest RC on validation set in ",weights_dir)
-                weight_file, max_rc, max_mse, max_epoch= get_max_rc_weights(weights_dir)
-
-                if weight_file != '':
-                    print('Found: ',weight_file, '  RC=', max_rc, '   MSE=', max_rc, '  epoch=', max_epoch)
-                    weight_files.append(weight_file)
-                    continue
-
-            # Get the weights from the last training epoch
-            files.sort(key=lambda x: get_split_index(x), reverse=True)
-            weight_file=files[0]
-            weight_files.append(weight_file)
+            model = model.cuda()
+    return model
 
 
-    return weight_files
-
-
-def run_command(command):
-    p = subprocess.Popen(command.split(),
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT)
-    return '\n'.join([ '\t'+line.decode("utf-8").strip() for line in p.stdout.readlines()])
-
-def ge_pkg_versions():
-
-    dep_versions = {}
-    cmd = 'cat /proc/driver/nvidia/version'
-    display_driver = run_command(cmd)
-    dep_versions['display'] = display_driver
-
-    dep_versions['cuda'] = 'NA'
-    cuda_home = '/usr/local/cuda/'
-    if 'CUDA_HOME' in os.environ:
-        cuda_home = os.environ['CUDA_HOME']
-
-    cmd = cuda_home+'/version.txt'
-    if os.path.isfile(cmd):
-        cuda_version = run_command('cat '+cmd)
-
-    dep_versions['cuda'] = cuda_version
-    dep_versions['cudnn'] = torch.backends.cudnn.version()
-
-    dep_versions['platform'] = platform.platform()
-    dep_versions['python'] = sys.version_info[0]
-    dep_versions['torch'] = torch.__version__
-    dep_versions['numpy'] = np.__version__
-    dep_versions['PIL'] = Image.__version__
-
-    dep_versions['OpenCV'] = 'NA'
-    if 'cv2' in sys.modules:
-        dep_versions['OpenCV'] = cv2.__version__
-
-    dep_versions['torchvision'] = pkg_resources.get_distribution("torchvision").version
-
-    return dep_versions
-
-
-def print_pkg_versions():
-    print("Packages & system versions:")
-    print("----------------------------------------------------------------------")
-    versions = ge_pkg_versions()
-    for key, val in versions.items():
-        print(key,": ",val)
-    print("")
-    return
-
-
-if __name__ == "__main__":
-    print_pkg_versions()
-
-    split_files = get_split_files('datasets/lamem', 'splits', 'test_*.txt')
-    print(split_files)
-
-    weight_files = get_weight_files(split_files, experiment_name='lamem_ResNet50FC_lstm3_last', max_rc_checkpoints=True)
-    # weight_files = get_weight_files(split_files, experiment_name='lamem_ResNet50FC_lstm3')
-    print(weight_files)
+def save_checkpoint(state, args, is_best, filename='checkpoint.pth.tar'):
+    torch.save(state, os.path.join(args.weights_dir, 'checkpoint.pth.tar'))
+    if is_best:
+        shutil.copy(os.path.join(args.weights_dir, filename),
+                    os.path.join(args.weights_dir, 'model_best.pth.tar'))  

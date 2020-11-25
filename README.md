@@ -8,4 +8,5 @@ In collaboration with Dr. Lin Jie and Dr. Geng Xue from ASTAR.
 Paper submitted to NeurIPS 2020, available at: [Trimmable Wide Binary Neural Network](https://github.com/GakkiChen/TWB-NN/blob/main/BNNS_NeurIPS20.pdf)
 
 ## Model Architecture
-![Alt text](./img/TWB_structure.PNG?raw=true "PrivAttNet Model")
+Expansion and pruning at different network level is illustrated here:
+![Alt text](./img/TWB_structure.PNG?raw=true "TWB_structure")
